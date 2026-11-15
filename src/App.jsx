@@ -1,7 +1,11 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { Link, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import ErrorBoundary from "./components/ErrorBoundary.jsx";
 
 const API = "/api";
+const SESSION_KEY = "eventpulse-session";
+// AuthProvider registers a callback here so request() can react to a 401 from outside React.
+let unauthorizedHandler = null;
 const AuthContext = createContext(null);
 const categories = ["All events", "Workshop", "Community", "Technology", "Wellness", "Arts", "Food"];
 const icons = { Workshop: "✳", Community: "⌂", Technology: "⌘", Wellness: "◉", Arts: "✦", Food: "⌑" };
@@ -17,24 +21,39 @@ async function request(path, { token, ...options } = {}) {
   });
   if (response.status === 204) return null;
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Something went wrong.");
+  if (!response.ok) {
+    // A 401 on a request that sent a token means the session is dead: clear it and send the user to /login.
+    // (A failed login has no token, so it is not treated as an expired session.)
+    if (response.status === 401 && token && unauthorizedHandler) unauthorizedHandler();
+    throw new Error(data.error || "Something went wrong.");
+  }
   return data;
 }
 
 function AuthProvider({ children }) {
+  const navigate = useNavigate();
   const [session, setSession] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("eventpulse-session")) || null; }
+    try { return JSON.parse(localStorage.getItem(SESSION_KEY)) || null; }
     catch { return null; }
   });
   const signIn = (data) => {
     const next = { user: data.user, token: data.token };
-    localStorage.setItem("eventpulse-session", JSON.stringify(next));
+    localStorage.setItem(SESSION_KEY, JSON.stringify(next));
     setSession(next);
   };
   const signOut = () => {
-    localStorage.removeItem("eventpulse-session");
+    localStorage.removeItem(SESSION_KEY);
     setSession(null);
   };
+  useEffect(() => {
+    unauthorizedHandler = () => {
+      if (!localStorage.getItem(SESSION_KEY)) return; // already signed out; avoid repeat redirects
+      localStorage.removeItem(SESSION_KEY);
+      setSession(null);
+      navigate("/login", { state: { message: "Your session has expired. Please sign in again." } });
+    };
+    return () => { unauthorizedHandler = null; };
+  }, [navigate]);
   const value = useMemo(() => ({ ...session, signIn, signOut }), [session]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
@@ -47,6 +66,7 @@ function App() {
 
 function Layout() {
   const auth = useAuth();
+  const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div className="app-shell">
@@ -72,6 +92,7 @@ function Layout() {
         </div>
       </header>
       <main>
+        <ErrorBoundary key={location.pathname}>
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/events/:id" element={<EventDetails />} />
@@ -83,6 +104,7 @@ function Layout() {
           <Route path="/my-tickets" element={<MyTickets />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
+        </ErrorBoundary>
       </main>
       <footer className="footer">
         <Link className="brand footer-brand" to="/"><span className="brand-mark"><span /></span><span>event<span className="brand-light">pulse</span></span></Link>
@@ -234,10 +256,11 @@ function EventDetails() {
 function AuthPage({ mode }) {
   const auth = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const isSignup = mode === "signup";
   const [form, setForm] = useState({ name: "", email: "", password: "", role: searchParams.get("role") === "organizer" ? "organizer" : "attendee" });
-  const [error, setError] = useState("");
+  const [error, setError] = useState(location.state?.message || "");
   const [busy, setBusy] = useState(false);
   async function submit(e) {
     e.preventDefault(); setError(""); setBusy(true);
